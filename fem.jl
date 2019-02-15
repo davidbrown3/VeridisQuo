@@ -1,5 +1,8 @@
 # Introduction to Finite Element Analysis Using MATLAB and Abaqus
 
+using ForwardDiff, ReverseDiff
+# using Zygote
+
 nodes = [
     0. 0.
     1. 2.
@@ -59,58 +62,76 @@ loads[7, :] = [0. -10.]
 # TODO: Why [:]
 loadsDOF = reshape(loads',:,1)[:]
 
-NNodes = size(nodes, 1)
 NEdges = size(edges, 1)
-NDOFNode = 2
-NDOFSystem = NDOFNode * NNodes
 
 Es = 30.e6 * ones(NEdges, 1)
 As = 0.02 * ones(NEdges, 1)
 
+function solveFEM(As)
 
-# Calculate length
-Ls = map((i,j)->(sqrt((nodes[i,1]-nodes[j,1])^2 + (nodes[i,2]-nodes[j,2])^2)),
-                    edges[:,1], edges[:,2])
+    NNodes = size(nodes, 1)
+    NDOFNode = 2
+    NDOFSystem = NDOFNode * NNodes
 
-# Calculate local→global transformation matrix
-θs = map((i,j)->atan(nodes[j,2]-nodes[i,2], nodes[j,1]-nodes[i,1]),
-                    edges[:,1], edges[:,2])
+    # Calculate length
+    Ls = map((i,j)->(sqrt((nodes[i,1]-nodes[j,1])^2 + (nodes[i,2]-nodes[j,2])^2)),
+                        edges[:,1], edges[:,2])
 
-GenR = θ->[
-            cos(θ) -sin(θ) 0. 0.
-            sin(θ) cos(θ) 0. 0.
-            0. 0. cos(θ) -sin(θ)
-            0. 0. sin(θ) cos(θ)
-        ]
+    # Calculate local→global transformation matrix
+    θs = map((i,j)->atan(nodes[j,2]-nodes[i,2], nodes[j,1]-nodes[i,1]),
+                        edges[:,1], edges[:,2])
 
-R_Local = map(GenR, θs)
+    GenR = θ->[
+                cos(θ) -sin(θ) 0. 0.
+                sin(θ) cos(θ) 0. 0.
+                0. 0. cos(θ) -sin(θ)
+                0. 0. sin(θ) cos(θ)
+            ]
 
-# Operating on [x1, y1, x2, y2]
+    R_Local = map(GenR, θs)
 
-# Build local stiffness matrix
-KEdge_Local = map((E,A,L)->[[E*A/L 0. -E*A/L 0.]; [0. 0. 0. 0.]; [-E*A/L 0. E*A/L 0.]; [0. 0. 0. 0.]],
-                            Es, As, Ls)
+    # Operating on [x1, y1, x2, y2]
 
-KEdge_Global = map((R, K)-> R * K * R', R_Local, KEdge_Local)
+    # Build local stiffness matrix
+    # Array of arrays during autodiff
+    KEdge_Local = map((E,A,L)->[[E*A/L 0. -E*A/L 0.]; [0. 0. 0. 0.]; [-E*A/L 0. E*A/L 0.]; [0. 0. 0. 0.]],
+                                Es, As, Ls)
 
-KSystem = zeros(NDOFSystem, NDOFSystem)
-for i = 1:NEdges
-    Ks = reshape(KEdge_Global[i], 16, 1)[:,1]
-    LIs = Array{CartesianIndex{2},1}(undef,16)
-    base = [edges[i,1]*2-1 edges[i,1]*2 edges[i,2]*2-1 edges[i,2]*2]
-    for j1 = 1:4, j2 = 1:4
-        ix = (j1-1)*4+j2
-        LIs[ix] = CartesianIndex(base[j2], base[j1])
+    KEdge_Global = map((R, K)-> R * K * R', R_Local, KEdge_Local)
+
+    # For compatability with autodiff
+    KSystem = zeros(typeof(As[1]), NDOFSystem, NDOFSystem)
+
+    for i = 1:NEdges
+        Ks = reshape(KEdge_Global[i], 16, 1) # Unravelling a 4x4
+        LIs = Array{CartesianIndex{2},1}(undef,16)
+        base = [edges[i,1]*2-1 edges[i,1]*2 edges[i,2]*2-1 edges[i,2]*2]
+        for j1 = 1:4, j2 = 1:4
+            ix = (j1-1)*4+j2
+            LIs[ix] = CartesianIndex(base[j2], base[j1])
+        end
+        KSystem[LIs] += Ks
     end
-    KSystem[LIs] += Ks
+
+    KSystem_FixedFixed = KSystem[iDOFFixed, iDOFFixed]
+    KSystem_FixedFree = KSystem[iDOFFixed, iDOFFree]
+    KSystem_FreeFixed = KSystem[iDOFFree, iDOFFixed]
+    KSystem_FreeFree = KSystem[iDOFFree, iDOFFree]
+
+    FFree = loadsDOF[iDOFFree]
+    xFixed = zeros(size(iDOFFixed))
+    xFree = KSystem_FreeFree \ (FFree - KSystem_FreeFixed * xFixed)
+    FFixed = KSystem_FixedFixed * xFixed + KSystem_FixedFree * xFree
+
+    return xFree[1]
+
 end
 
-KSystem_FixedFixed = KSystem[iDOFFixed, iDOFFixed]
-KSystem_FixedFree = KSystem[iDOFFixed, iDOFFree]
-KSystem_FreeFixed = KSystem[iDOFFree, iDOFFixed]
-KSystem_FreeFree = KSystem[iDOFFree, iDOFFree]
+solution = solveFEM(As)
 
-FFree = loadsDOF[iDOFFree]
-xFixed = zeros(size(iDOFFixed))
-xFree = KSystem_FreeFree \ (FFree - KSystem_FreeFixed * xFixed)
-FFixed = KSystem_FixedFixed * xFixed + KSystem_FixedFree * xFree
+out = ForwardDiff.gradient(solveFEM, As)
+println(out)
+out = ReverseDiff.gradient(solveFEM, As)
+println(out)
+# out = Zygote.gradient(solveFEM, As)
+# println(out)
