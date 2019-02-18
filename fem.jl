@@ -1,7 +1,14 @@
 # Introduction to Finite Element Analysis Using MATLAB and Abaqus
 
-using ForwardDiff, ReverseDiff
+using ForwardDiff
+# using ReverseDiff
+#using Flux.Tracker: grad, update!
+using Statistics: mean
 # using Zygote
+#using Plots
+
+# Setting plot backends
+#plotlyjs()
 
 nodes = [
     0. 0.
@@ -15,6 +22,9 @@ nodes = [
     8. 0.
 ]
 
+nodesMin = [0. 0.]
+nodesMax = [8.0 5.0]
+
 # Enumerate each nodes DOFs: [x1, y1, x2, y2, ..., xn, yn] for nodes i→n
 
 NNodes = size(nodes, 1)
@@ -24,6 +34,11 @@ iNodeFree = setdiff(iNodes, iNodeFixed)
 
 NFixed = length(iNodeFixed)
 NFree = length(iNodeFree)
+
+NNodes = size(nodes, 1)
+
+NDOFNode = 2
+NDOFSystem = NDOFNode * NNodes
 
 # Defining a function to convert iNodes to iDOF
 iNode2iDOF(iNode) = reshape(reduce(vcat, # Long winded way of flattening array of arrays → matrix
@@ -52,26 +67,18 @@ edges = [
     8 9
 ]
 
+NEdges = size(edges, 1)
+
 loads = zeros(NNodes, 2)
-loads[2, :] = [15. 0.]
-loads[3, :] = [0. -5.]
-loads[4, :] = [0. -7.]
-loads[7, :] = [0. -10.]
+loads[5, :] = [0. -10.]
 
 # Indexing loads by DOF as opposed to node
 # TODO: Why [:]
 loadsDOF = reshape(loads',:,1)[:]
 
-NEdges = size(edges, 1)
-
 Es = 30.e6 * ones(NEdges, 1)
-As = 0.02 * ones(NEdges, 1)
 
-function solveFEM(As)
-
-    NNodes = size(nodes, 1)
-    NDOFNode = 2
-    NDOFSystem = NDOFNode * NNodes
+function solveFEM(nodes)
 
     # Calculate length
     Ls = map((i,j)->(sqrt((nodes[i,1]-nodes[j,1])^2 + (nodes[i,2]-nodes[j,2])^2)),
@@ -94,23 +101,24 @@ function solveFEM(As)
 
     # Build local stiffness matrix
     # Array of arrays during autodiff
+
     KEdge_Local = map((E,A,L)->[[E*A/L 0. -E*A/L 0.]; [0. 0. 0. 0.]; [-E*A/L 0. E*A/L 0.]; [0. 0. 0. 0.]],
                                 Es, As, Ls)
 
     KEdge_Global = map((R, K)-> R * K * R', R_Local, KEdge_Local)
 
     # For compatability with autodiff
-    KSystem = zeros(typeof(As[1]), NDOFSystem, NDOFSystem)
+    #KSystem = zeros(typeof(As[1), NDOFSystem, NDOFSystem)
+    ADType = typeof(nodes[1])
+    KSystem = zeros(ADType, NDOFSystem, NDOFSystem)
 
     for i = 1:NEdges
-        Ks = reshape(KEdge_Global[i], 16, 1) # Unravelling a 4x4
-        LIs = Array{CartesianIndex{2},1}(undef,16)
+        LIs = Array{CartesianIndex{2},2}(undef,4,4)
         base = [edges[i,1]*2-1 edges[i,1]*2 edges[i,2]*2-1 edges[i,2]*2]
         for j1 = 1:4, j2 = 1:4
-            ix = (j1-1)*4+j2
-            LIs[ix] = CartesianIndex(base[j2], base[j1])
+            LIs[j2, j1] = CartesianIndex(base[j2], base[j1])
         end
-        KSystem[LIs] += Ks
+        KSystem[LIs] += KEdge_Global[i]
     end
 
     KSystem_FixedFixed = KSystem[iDOFFixed, iDOFFixed]
@@ -123,15 +131,63 @@ function solveFEM(As)
     xFree = KSystem_FreeFree \ (FFree - KSystem_FreeFixed * xFixed)
     FFixed = KSystem_FixedFixed * xFixed + KSystem_FixedFree * xFree
 
-    return xFree[1]
+    x = zeros(ADType, NDOFSystem)
+    x[iDOFFixed] = xFixed
+    x[iDOFFree] = xFree
+
+    return -x[10]
 
 end
 
-solution = solveFEM(As)
+#out = ForwardDiff.gradient(solveFEM, As)
+#println(out)
 
-out = ForwardDiff.gradient(solveFEM, As)
-println(out)
-out = ReverseDiff.gradient(solveFEM, As)
-println(out)
+# TODO: Can not get Zygote library working
 # out = Zygote.gradient(solveFEM, As)
 # println(out)
+
+# TODO: Can not get Flux library working
+#fluxF(A) = Tracker.gradient(solveFEM, A)[1]
+#fluxF(As)
+
+# TODO: Need to install and compile plots library
+# plt = scatter(nodes[:,1], nodes[:,2])
+#
+# for i = 1:size(edges, 1)
+#     plot!(plt, nodes[edges[i,:],1], nodes[edges[i,:],2])
+# end
+# display(plt)
+
+#plot(x=map(x->x+1,nodes[:,1]), y=nodes[:,2], Geom.point)
+
+# TODO: Can not get Flux optimisation components to work
+#opt = Descent(0.1)
+
+NEpochs = 1e5
+learn = 0.1
+
+As = 0.02 * ones(NEdges, 1)
+
+solution = solveFEM(nodes)
+#println(As)
+#println(solution)
+
+for i = 1:NEpochs
+
+    # Setting As as global so it can be modified within for loop
+    global nodes
+
+    solution = solveFEM(nodes)
+    grads = ForwardDiff.gradient(solveFEM, nodes)
+
+    # Running gradient descent
+    #TODO: Fixing the prescribed nodes
+    nodes[2:end-1,:] -= grads[2:end-1,:] * learn
+
+end
+
+#TODO: Use activation function to limit variable limits
+
+solution = solveFEM(nodes)
+println(nodes)
+println(solution)
