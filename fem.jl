@@ -3,12 +3,14 @@
 using ForwardDiff
 # using ReverseDiff
 #using Flux.Tracker: grad, update!
+#using Flux, Flux.Tracker
 using Statistics: mean
 # using Zygote
-#using Plots
+using Plots
+using JLD
 
 # Setting plot backends
-#plotlyjs()
+plotlyjs()
 
 nodes = [
     0. 0.
@@ -150,44 +152,80 @@ end
 #fluxF(A) = Tracker.gradient(solveFEM, A)[1]
 #fluxF(As)
 
-# TODO: Need to install and compile plots library
-# plt = scatter(nodes[:,1], nodes[:,2])
-#
-# for i = 1:size(edges, 1)
-#     plot!(plt, nodes[edges[i,:],1], nodes[edges[i,:],2])
-# end
-# display(plt)
-
 #plot(x=map(x->x+1,nodes[:,1]), y=nodes[:,2], Geom.point)
 
 # TODO: Can not get Flux optimisation components to work
 #opt = Descent(0.1)
 
-NEpochs = 1e5
-learn = 0.1
+NEpochs = Int64(1e5)
+learn = 1.
+momentum = 0.9
+grads = zeros(size(nodes))
 
 As = 0.02 * ones(NEdges, 1)
 
 solution = solveFEM(nodes)
 #println(As)
-#println(solution)
+println(solution)
+
+storage = Array{Array{Float64,2},1}(undef, NEpochs)
 
 for i = 1:NEpochs
 
+    if mod(i,100)==0
+        println(i)
+    end
+
     # Setting As as global so it can be modified within for loop
     global nodes
+    global grads
 
-    solution = solveFEM(nodes)
+    # DIY momentum
+    grads_prev = grads
+
+    #TODO: print solution periodically
+    #solution = solveFEM(nodes)
     grads = ForwardDiff.gradient(solveFEM, nodes)
 
     # Running gradient descent
     #TODO: Fixing the prescribed nodes
-    nodes[2:end-1,:] -= grads[2:end-1,:] * learn
+    nodes[2:end-1,:] -= (grads[2:end-1,:] * learn + momentum * grads_prev[2:end-1,:])
+
+    # Storing data
+    storage[i] = copy(nodes)
 
 end
+
+# Saving compiled data
+save("/tmp/myfile.jld", "nodes", storage)
 
 #TODO: Use activation function to limit variable limits
 
 solution = solveFEM(nodes)
 println(nodes)
 println(solution)
+
+@gif for i in 1:100:size(storage,1)
+
+    plt = scatter(storage[i][:,1], storage[i][:,2])
+
+    for j = 1:size(edges, 1)
+        plot!(plt, storage[i][edges[j,:],1], storage[i][edges[j,:],2])
+    end
+
+    # gif(anim, "/tmp/anim_fps30.gif", fps = 30)
+
+end
+
+# Plot in the loop
+# TODO: Need to install and compile plots library
+# plt = scatter(nodes[:,1], nodes[:,2])
+#
+# for i = 1:size(edges, 1)
+#     plot!(plt, nodes[edges[i,:],1], nodes[edges[i,:],2])
+# end
+#
+# gif(anim, "/tmp/anim_fps30.gif", fps = 30)
+
+
+#display(plt)
