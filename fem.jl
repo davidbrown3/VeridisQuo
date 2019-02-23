@@ -1,16 +1,7 @@
-# Introduction to Finite Element Analysis Using MATLAB and Abaqus
-
 using ForwardDiff
-# using ReverseDiff
-#using Flux.Tracker: grad, update!
-#using Flux, Flux.Tracker
-using Statistics: mean
-# using Zygote
 using Plots
 using JLD
-
-# Setting plot backends
-plotlyjs()
+using ColorSchemes
 
 nodes = [
     0. 0.
@@ -24,15 +15,18 @@ nodes = [
     8. 0.
 ]
 
+# Enumerate each nodes DOFs: [x1, y1, x2, y2, ..., xn, yn] for nodes i→n
+NNodes = size(nodes, 1)
+iDOF = reshape((1:NNodes*2), 2, NNodes)'
+
 nodesMin = [0. 0.]
 nodesMax = [8.0 5.0]
 
-# Enumerate each nodes DOFs: [x1, y1, x2, y2, ..., xn, yn] for nodes i→n
-
-NNodes = size(nodes, 1)
 iNodes = 1:NNodes
 iNodeFixed = [1, 9]
 iNodeFree = setdiff(iNodes, iNodeFixed)
+
+iNodeOptimise = 5
 
 NFixed = length(iNodeFixed)
 NFree = length(iNodeFree)
@@ -72,24 +66,37 @@ edges = [
 NEdges = size(edges, 1)
 
 loads = zeros(NNodes, 2)
+
+#TODO: Relate learning rate to force
 loads[5, :] = [0. -10.]
 
 # Indexing loads by DOF as opposed to node
-# TODO: Why [:]
 loadsDOF = reshape(loads',:,1)[:]
 
 Es = 30.e6 * ones(NEdges, 1)
 
+#TODO: Move this out of the loop
+LIs = Array{Array{CartesianIndex{2},2},1}(undef, NEdges)
+for i = 1:NEdges
+    LI = Array{CartesianIndex{2},2}(undef,4,4)
+    base = [edges[i,1]*2-1 edges[i,1]*2 edges[i,2]*2-1 edges[i,2]*2]
+    for j1 = 1:4, j2 = 1:4
+        LI[j2, j1] = CartesianIndex(base[j2], base[j1])
+    end
+    LIs[i] = LI
+end
+
 function solveFEM(nodes)
 
-    # Calculate length
+    # Calculate length of each edge
     Ls = map((i,j)->(sqrt((nodes[i,1]-nodes[j,1])^2 + (nodes[i,2]-nodes[j,2])^2)),
                         edges[:,1], edges[:,2])
 
-    # Calculate local→global transformation matrix
+    # Calculate local→global angular deflection for each edge
     θs = map((i,j)->atan(nodes[j,2]-nodes[i,2], nodes[j,1]-nodes[i,1]),
                         edges[:,1], edges[:,2])
 
+    # Generating transformation matrix for each edge
     GenR = θ->[
                 cos(θ) -sin(θ) 0. 0.
                 sin(θ) cos(θ) 0. 0.
@@ -99,28 +106,20 @@ function solveFEM(nodes)
 
     R_Local = map(GenR, θs)
 
-    # Operating on [x1, y1, x2, y2]
-
     # Build local stiffness matrix
-    # Array of arrays during autodiff
-
+    # Operating on [x1, y1, x2, y2]
     KEdge_Local = map((E,A,L)->[[E*A/L 0. -E*A/L 0.]; [0. 0. 0. 0.]; [-E*A/L 0. E*A/L 0.]; [0. 0. 0. 0.]],
                                 Es, As, Ls)
 
+    # Transforming stiffness matrix to global coordinates
     KEdge_Global = map((R, K)-> R * K * R', R_Local, KEdge_Local)
 
     # For compatability with autodiff
-    #KSystem = zeros(typeof(As[1), NDOFSystem, NDOFSystem)
     ADType = typeof(nodes[1])
     KSystem = zeros(ADType, NDOFSystem, NDOFSystem)
 
     for i = 1:NEdges
-        LIs = Array{CartesianIndex{2},2}(undef,4,4)
-        base = [edges[i,1]*2-1 edges[i,1]*2 edges[i,2]*2-1 edges[i,2]*2]
-        for j1 = 1:4, j2 = 1:4
-            LIs[j2, j1] = CartesianIndex(base[j2], base[j1])
-        end
-        KSystem[LIs] += KEdge_Global[i]
+        KSystem[LIs[i]] += KEdge_Global[i]
     end
 
     KSystem_FixedFixed = KSystem[iDOFFixed, iDOFFixed]
@@ -137,25 +136,26 @@ function solveFEM(nodes)
     x[iDOFFixed] = xFixed
     x[iDOFFree] = xFree
 
-    return -x[10]
+    # Calculating force in edge
+    FEdge = zeros(ADType, 4, NEdges)
+    for i = 1:NEdges
+        xVec = reshape(x[iDOF[edges[i,:],:]]',4,1)
+        FEdge[:,i] = KEdge_Local[i] * xVec
+    end
+
+    # Calculating node euclidian displacement
+    xDisplacement = sum(x[iDOF].^2,dims=2).^0.5
+
+    return FEdge, xDisplacement
 
 end
 
-#out = ForwardDiff.gradient(solveFEM, As)
-#println(out)
+function optimiseFEM(nodes)
 
-# TODO: Can not get Zygote library working
-# out = Zygote.gradient(solveFEM, As)
-# println(out)
+    FEdge, xDisplacement = solveFEM(nodes)
+    cost = xDisplacement[iNodeOptimise]
 
-# TODO: Can not get Flux library working
-#fluxF(A) = Tracker.gradient(solveFEM, A)[1]
-#fluxF(As)
-
-#plot(x=map(x->x+1,nodes[:,1]), y=nodes[:,2], Geom.point)
-
-# TODO: Can not get Flux optimisation components to work
-#opt = Descent(0.1)
+end
 
 NEpochs = Int64(1e5)
 learn = 1.
@@ -165,14 +165,15 @@ grads = zeros(size(nodes))
 As = 0.02 * ones(NEdges, 1)
 
 solution = solveFEM(nodes)
-#println(As)
 println(solution)
 
 storage = Array{Array{Float64,2},1}(undef, NEpochs)
+storage2 = Array{Array{Float64,2},1}(undef, NEpochs)
 
 for i = 1:NEpochs
 
-    if mod(i,100)==0
+    # Monitoring progress
+    if mod(i,1000) == 0
         println(i)
     end
 
@@ -180,52 +181,57 @@ for i = 1:NEpochs
     global nodes
     global grads
 
+    #
+    FEdge, xDisplacement = solveFEM(nodes)
+
     # DIY momentum
     grads_prev = grads
+    grads = ForwardDiff.gradient(optimiseFEM, nodes)
 
-    #TODO: print solution periodically
-    #solution = solveFEM(nodes)
-    grads = ForwardDiff.gradient(solveFEM, nodes)
-
-    # Running gradient descent
-    #TODO: Fixing the prescribed nodes
+    # Running gradient descent (Fixing the prescribed nodes)
     nodes[2:end-1,:] -= (grads[2:end-1,:] * learn + momentum * grads_prev[2:end-1,:])
 
     # Storing data
     storage[i] = copy(nodes)
+    storage2[i] = copy(FEdge)
 
 end
 
-# Saving compiled data
-save("/tmp/myfile.jld", "nodes", storage)
+# Saving cached data
+save("/tmp/myfile.jld", "storage", storage, "storage2", storage2, "edges", edges)
 
-#TODO: Use activation function to limit variable limits
+# Loading cached data
+cached = load("/tmp/myfile.jld")
+storage = cached["storage"]
+storage2 = cached["storage2"]
+edges = cached["edges"]
+nodes = storage[end]
 
 solution = solveFEM(nodes)
 println(nodes)
 println(solution)
 
-@gif for i in 1:100:size(storage,1)
+Fs = map(x->x[1,:], storage2)
+FMax = max(maximum(map(x->maximum(x), Fs)), -minimum(map(x->minimum(x), Fs)))
 
-    plt = scatter(storage[i][:,1], storage[i][:,2])
+@gif for i in 1:1000:size(storage,1)
+
+    plt = scatter(storage[i][:,1], storage[i][:,2], legend=false)
 
     for j = 1:size(edges, 1)
-        plot!(plt, storage[i][edges[j,:],1], storage[i][edges[j,:],2])
+        col = get(ColorSchemes.coolwarm, storage2[i][1,j]/FMax/2+0.5)
+        plot!(plt, storage[i][edges[j,:],1], storage[i][edges[j,:],2], legend=false, linecolor=col)
     end
-
-    # gif(anim, "/tmp/anim_fps30.gif", fps = 30)
 
 end
 
-# Plot in the loop
-# TODO: Need to install and compile plots library
-# plt = scatter(nodes[:,1], nodes[:,2])
-#
-# for i = 1:size(edges, 1)
-#     plot!(plt, nodes[edges[i,:],1], nodes[edges[i,:],2])
+plt = scatter(storage[end][:,1], storage[i][:,2], legend=false)
+for j = 1:size(edges, 1)
+    plot!(plt, storage[end][edges[j,:],1], storage[end][edges[j,:],2], legend=false)
+end
+
+# plt = scatter(nodes[:,1], nodes[:,2], legend=false)
+# for j = 1:size(edges, 1)
+#     plot!(plt, nodes[edges[j,:],1], nodes[edges[j,:],2], legend=false)
 # end
-#
-# gif(anim, "/tmp/anim_fps30.gif", fps = 30)
-
-
-#display(plt)
+# display(plt)
