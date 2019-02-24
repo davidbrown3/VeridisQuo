@@ -2,8 +2,13 @@ using ForwardDiff
 using Plots
 using JLD
 using ColorSchemes
+using Flux
+using Flux.Tracker: update!
 
-nodes = [
+# Setting plot backends
+plotlyjs()
+
+nodes = param([
     0. 0.
     1. 2.
     2. 0.
@@ -13,7 +18,7 @@ nodes = [
     6. 0.
     7. 2.
     8. 0.
-]
+])
 
 # Enumerate each nodes DOFs: [x1, y1, x2, y2, ..., xn, yn] for nodes i→n
 NNodes = size(nodes, 1)
@@ -25,6 +30,11 @@ nodesMax = [8.0 5.0]
 iNodes = 1:NNodes
 iNodeFixed = [1, 9]
 iNodeFree = setdiff(iNodes, iNodeFixed)
+
+bNodeFree = ones(NNodes,2)
+for i in iNodeFixed
+    bNodeFree[i,:] *= 0.
+end
 
 iNodeOptimise = 5
 
@@ -63,19 +73,17 @@ edges = [
     8 9
 ]
 
+As = 0.02 * ones(NEdges, 1)
+Es = 30.e6 * ones(NEdges, 1)
+
 NEdges = size(edges, 1)
 
 loads = zeros(NNodes, 2)
-
-#TODO: Relate learning rate to force
-loads[5, :] = [0. -10.]
+loads[5, :] = [0. -10.] #TODO: Relate learning rate to force
 
 # Indexing loads by DOF as opposed to node
 loadsDOF = reshape(loads',:,1)[:]
 
-Es = 30.e6 * ones(NEdges, 1)
-
-#TODO: Move this out of the loop
 LIs = Array{Array{CartesianIndex{2},2},1}(undef, NEdges)
 for i = 1:NEdges
     LI = Array{CartesianIndex{2},2}(undef,4,4)
@@ -86,7 +94,10 @@ for i = 1:NEdges
     LIs[i] = LI
 end
 
-function solveFEM(nodes)
+function solveFEM(nodes, loads)
+
+    # For compatability with autodiff
+    ADType = typeof(nodes[1])
 
     # Calculate length of each edge
     Ls = map((i,j)->(sqrt((nodes[i,1]-nodes[j,1])^2 + (nodes[i,2]-nodes[j,2])^2)),
@@ -108,14 +119,12 @@ function solveFEM(nodes)
 
     # Build local stiffness matrix
     # Operating on [x1, y1, x2, y2]
-    KEdge_Local = map((E,A,L)->[[E*A/L 0. -E*A/L 0.]; [0. 0. 0. 0.]; [-E*A/L 0. E*A/L 0.]; [0. 0. 0. 0.]],
+    KEdge_Local = map((E,A,L)->[E*A/L 0. -E*A/L 0.; 0. 0. 0. 0.; -E*A/L 0. E*A/L 0.; 0. 0. 0. 0.],
                                 Es, As, Ls)
 
     # Transforming stiffness matrix to global coordinates
     KEdge_Global = map((R, K)-> R * K * R', R_Local, KEdge_Local)
 
-    # For compatability with autodiff
-    ADType = typeof(nodes[1])
     KSystem = zeros(ADType, NDOFSystem, NDOFSystem)
 
     for i = 1:NEdges
@@ -150,25 +159,28 @@ function solveFEM(nodes)
 
 end
 
-function optimiseFEM(nodes)
+function optimiseFEM(nodes, loads, targets)
 
-    FEdge, xDisplacement = solveFEM(nodes)
+    FEdge, xDisplacement = solveFEM(nodes, loads)
     cost = xDisplacement[iNodeOptimise]
+
+    return cost
 
 end
 
 NEpochs = Int64(1e5)
-learn = 1.
-momentum = 0.9
-grads = zeros(size(nodes))
 
-As = 0.02 * ones(NEdges, 1)
-
-solution = solveFEM(nodes)
+solution = solveFEM(nodes, loads)
 println(solution)
 
 storage = Array{Array{Float64,2},1}(undef, NEpochs)
 storage2 = Array{Array{Float64,2},1}(undef, NEpochs)
+
+θ = Params([nodes])
+target = 0. # Target displacement
+gradfcn = Tracker.gradient(()->optimiseFEM(nodes, loads, target), θ)
+
+opt = ADAM()
 
 for i = 1:NEpochs
 
@@ -177,22 +189,14 @@ for i = 1:NEpochs
         println(i)
     end
 
-    # Setting As as global so it can be modified within for loop
-    global nodes
-    global grads
+    FEdge, xDisplacement = solveFEM(nodes.data, loads)
 
-    #
-    FEdge, xDisplacement = solveFEM(nodes)
-
-    # DIY momentum
-    grads_prev = grads
-    grads = ForwardDiff.gradient(optimiseFEM, nodes)
-
-    # Running gradient descent (Fixing the prescribed nodes)
-    nodes[2:end-1,:] -= (grads[2:end-1,:] * learn + momentum * grads_prev[2:end-1,:])
+    # Fixing restricted nodes
+    grads = gradfcn[nodes] .* bNodeFree
+    update!(opt, nodes, grads)
 
     # Storing data
-    storage[i] = copy(nodes)
+    storage[i] = copy(nodes.data)
     storage2[i] = copy(FEdge)
 
 end
@@ -207,31 +211,18 @@ storage2 = cached["storage2"]
 edges = cached["edges"]
 nodes = storage[end]
 
-solution = solveFEM(nodes)
-println(nodes)
+solution = optimiseFEM(nodes, loads)
 println(solution)
 
 Fs = map(x->x[1,:], storage2)
 FMax = max(maximum(map(x->maximum(x), Fs)), -minimum(map(x->minimum(x), Fs)))
 
-@gif for i in 1:1000:size(storage,1)
+@gif for i in 1:100:size(storage,1)
 
     plt = scatter(storage[i][:,1], storage[i][:,2], legend=false)
-
     for j = 1:size(edges, 1)
         col = get(ColorSchemes.coolwarm, storage2[i][1,j]/FMax/2+0.5)
         plot!(plt, storage[i][edges[j,:],1], storage[i][edges[j,:],2], legend=false, linecolor=col)
     end
 
 end
-
-plt = scatter(storage[end][:,1], storage[i][:,2], legend=false)
-for j = 1:size(edges, 1)
-    plot!(plt, storage[end][edges[j,:],1], storage[end][edges[j,:],2], legend=false)
-end
-
-# plt = scatter(nodes[:,1], nodes[:,2], legend=false)
-# for j = 1:size(edges, 1)
-#     plot!(plt, nodes[edges[j,:],1], nodes[edges[j,:],2], legend=false)
-# end
-# display(plt)
