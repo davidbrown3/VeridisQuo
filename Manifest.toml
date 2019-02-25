@@ -451,6 +451,12 @@ uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 deps = ["Printf"]
 uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 
+[[ProgressMeter]]
+deps = ["Distributed", "Printf", "Random", "Test"]
+git-tree-sha1 = "48058bc11607676e5bbc0b974af79106c6200787"
+uuid = "92933f4c-e287-5a05-a399-4b506db050ca"
+version = "0.9.0"
+
 [[REPL]]
 deps = ["InteractiveUtils", "Markdown", "Sockets"]
 uuid = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"
@@ -482,6 +488,12 @@ deps = ["DiffResults", "DiffRules", "ForwardDiff", "FunctionWrappers", "LinearAl
 git-tree-sha1 = "d44e80d815a1a5abaf1ff1def21bb629cabaffec"
 uuid = "37e2e3b7-166d-5795-8a7a-e32c996b4267"
 version = "0.3.1"
+
+[[Revise]]
+deps = ["Distributed", "FileWatching", "InteractiveUtils", "LibGit2", "OrderedCollections", "Pkg", "REPL", "Random", "Test", "UUIDs", "Unicode"]
+git-tree-sha1 = "341be2df64de382559e2cc307e02ed4192f8a8b7"
+uuid = "295af30f-e4ad-537b-8983-00126c2a3abe"
+version = "1.0.2"
 
 [[SHA]]
 uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"

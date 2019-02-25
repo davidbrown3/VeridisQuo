@@ -1,14 +1,20 @@
-using ForwardDiff
+include("./femlib.jl")
+
 using Plots
 using JLD
 using ColorSchemes
 using Flux
-using Flux.Tracker: update!
+using Flux.Tracker
+using ProgressMeter
+using Main.femlib
 
 # Setting plot backends
 plotlyjs()
 
-nodes = param([
+## Problem Setup
+
+# Defining Nodes
+xyNodes = param([
     0. 0.
     1. 2.
     2. 0.
@@ -19,42 +25,21 @@ nodes = param([
     7. 2.
     8. 0.
 ])
+NNodes = size(xyNodes, 1)
 
-# Enumerate each nodes DOFs: [x1, y1, x2, y2, ..., xn, yn] for nodes i→n
-NNodes = size(nodes, 1)
-iDOF = reshape((1:NNodes*2), 2, NNodes)'
+Nodes = [Node(x,y,true,true,i*2-1,i*2) for (i,(x,y)) in enumerate(zip(xyNodes[:,1], xyNodes[:,2]))]
 
-nodesMin = [0. 0.]
-nodesMax = [8.0 5.0]
-
-iNodes = 1:NNodes
 iNodeFixed = [1, 9]
-iNodeFree = setdiff(iNodes, iNodeFixed)
-
 bNodeFree = ones(NNodes,2)
 for i in iNodeFixed
+    Nodes[i].bX = false
+    Nodes[i].bY = false
     bNodeFree[i,:] *= 0.
 end
 
 iNodeOptimise = 5
 
-NFixed = length(iNodeFixed)
-NFree = length(iNodeFree)
-
-NNodes = size(nodes, 1)
-
-NDOFNode = 2
-NDOFSystem = NDOFNode * NNodes
-
-# Defining a function to convert iNodes to iDOF
-iNode2iDOF(iNode) = reshape(reduce(vcat, # Long winded way of flattening array of arrays → matrix
-                        map(i->[2*i-1 2*i], iNode) # Enumerating DOF for each node
-                        )', :, 1) # Transposing for correct unravelling in reshape
-
-# TODO: Why is there the need to [:]
-iDOFFixed = iNode2iDOF(iNodeFixed)[:]
-iDOFFree = iNode2iDOF(iNodeFree)[:]
-
+# Defining edges
 edges = [
     1 2
     1 3
@@ -73,131 +58,52 @@ edges = [
     8 9
 ]
 
-As = 0.02 * ones(NEdges, 1)
-Es = 30.e6 * ones(NEdges, 1)
+A = 0.02
+E = 30e6
+Edges = map((a,b)->Edge(a,b,A,E,calc_IGlobal(a,b,Nodes[a],Nodes[b])), edges[:,1], edges[:,2])
 
-NEdges = size(edges, 1)
-
+# Defining Loads
 loads = zeros(NNodes, 2)
 loads[5, :] = [0. -10.] #TODO: Relate learning rate to force
 
-# Indexing loads by DOF as opposed to node
-loadsDOF = reshape(loads',:,1)[:]
+function optimiseFEM(Nodes, loads, targets)
 
-LIs = Array{Array{CartesianIndex{2},2},1}(undef, NEdges)
-for i = 1:NEdges
-    LI = Array{CartesianIndex{2},2}(undef,4,4)
-    base = [edges[i,1]*2-1 edges[i,1]*2 edges[i,2]*2-1 edges[i,2]*2]
-    for j1 = 1:4, j2 = 1:4
-        LI[j2, j1] = CartesianIndex(base[j2], base[j1])
-    end
-    LIs[i] = LI
-end
-
-function solveFEM(nodes, loads)
-
-    # For compatability with autodiff
-    ADType = typeof(nodes[1])
-
-    # Calculate length of each edge
-    Ls = map((i,j)->(sqrt((nodes[i,1]-nodes[j,1])^2 + (nodes[i,2]-nodes[j,2])^2)),
-                        edges[:,1], edges[:,2])
-
-    # Calculate local→global angular deflection for each edge
-    θs = map((i,j)->atan(nodes[j,2]-nodes[i,2], nodes[j,1]-nodes[i,1]),
-                        edges[:,1], edges[:,2])
-
-    # Generating transformation matrix for each edge
-    GenR = θ->[
-                cos(θ) -sin(θ) 0. 0.
-                sin(θ) cos(θ) 0. 0.
-                0. 0. cos(θ) -sin(θ)
-                0. 0. sin(θ) cos(θ)
-            ]
-
-    R_Local = map(GenR, θs)
-
-    # Build local stiffness matrix
-    # Operating on [x1, y1, x2, y2]
-    KEdge_Local = map((E,A,L)->[E*A/L 0. -E*A/L 0.; 0. 0. 0. 0.; -E*A/L 0. E*A/L 0.; 0. 0. 0. 0.],
-                                Es, As, Ls)
-
-    # Transforming stiffness matrix to global coordinates
-    KEdge_Global = map((R, K)-> R * K * R', R_Local, KEdge_Local)
-
-    KSystem = zeros(ADType, NDOFSystem, NDOFSystem)
-
-    for i = 1:NEdges
-        KSystem[LIs[i]] += KEdge_Global[i]
-    end
-
-    KSystem_FixedFixed = KSystem[iDOFFixed, iDOFFixed]
-    KSystem_FixedFree = KSystem[iDOFFixed, iDOFFree]
-    KSystem_FreeFixed = KSystem[iDOFFree, iDOFFixed]
-    KSystem_FreeFree = KSystem[iDOFFree, iDOFFree]
-
-    FFree = loadsDOF[iDOFFree]
-    xFixed = zeros(size(iDOFFixed))
-    xFree = KSystem_FreeFree \ (FFree - KSystem_FreeFixed * xFixed)
-    FFixed = KSystem_FixedFixed * xFixed + KSystem_FixedFree * xFree
-
-    x = zeros(ADType, NDOFSystem)
-    x[iDOFFixed] = xFixed
-    x[iDOFFree] = xFree
-
-    # Calculating force in edge
-    FEdge = zeros(ADType, 4, NEdges)
-    for i = 1:NEdges
-        xVec = reshape(x[iDOF[edges[i,:],:]]',4,1)
-        FEdge[:,i] = KEdge_Local[i] * xVec
-    end
-
-    # Calculating node euclidian displacement
-    xDisplacement = sum(x[iDOF].^2,dims=2).^0.5
-
-    return FEdge, xDisplacement
-
-end
-
-function optimiseFEM(nodes, loads, targets)
-
-    FEdge, xDisplacement = solveFEM(nodes, loads)
+    FEdge, xDisplacement = solveFEM(Nodes, Edges, loads)
     cost = xDisplacement[iNodeOptimise]
 
     return cost
 
 end
 
-NEpochs = Int64(1e5)
+θ = Params([xyNodes])
+target = 0. # Target displacement
+gradfcn = Tracker.gradient(()->optimiseFEM(Nodes, loads, target), θ)
 
-solution = solveFEM(nodes, loads)
-println(solution)
+NEpochs = Int64(1e5)
 
 storage = Array{Array{Float64,2},1}(undef, NEpochs)
 storage2 = Array{Array{Float64,2},1}(undef, NEpochs)
 
-θ = Params([nodes])
-target = 0. # Target displacement
-gradfcn = Tracker.gradient(()->optimiseFEM(nodes, loads, target), θ)
-
 opt = ADAM()
 
-for i = 1:NEpochs
+@showprogress for i = 1:NEpochs
 
-    # Monitoring progress
-    if mod(i,1000) == 0
-        println(i)
+    # Calculating edge properties
+    FEdge, xDisplacement = solveFEM(Nodes, Edges, loads)
+
+    # Calculating gradients
+    grads = gradfcn[xyNodes] .* bNodeFree
+
+    # SGD
+    Tracker.update!(opt, xyNodes, grads)
+    for (ix, Node) in enumerate(Nodes)
+        Node.X = xyNodes[ix,1]
+        Node.Y = xyNodes[ix,2]
     end
 
-    FEdge, xDisplacement = solveFEM(nodes.data, loads)
-
-    # Fixing restricted nodes
-    grads = gradfcn[nodes] .* bNodeFree
-    update!(opt, nodes, grads)
-
     # Storing data
-    storage[i] = copy(nodes.data)
-    storage2[i] = copy(FEdge)
+    storage[i] = map(x->x.data, xyNodes)
+    storage2[i] = map(x->x.data, FEdge)
 
 end
 
@@ -211,14 +117,9 @@ storage2 = cached["storage2"]
 edges = cached["edges"]
 nodes = storage[end]
 
-solution = optimiseFEM(nodes, loads)
-println(solution)
-
-Fs = map(x->x[1,:], storage2)
-FMax = max(maximum(map(x->maximum(x), Fs)), -minimum(map(x->minimum(x), Fs)))
-
 @gif for i in 1:100:size(storage,1)
-
+    Fs = storage2[i][1,:]
+    FMax = max(maximum(Fs), -minimum(Fs))
     plt = scatter(storage[i][:,1], storage[i][:,2], legend=false)
     for j = 1:size(edges, 1)
         col = get(ColorSchemes.coolwarm, storage2[i][1,j]/FMax/2+0.5)
