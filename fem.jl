@@ -1,129 +1,112 @@
 include("./femlib.jl")
+include("./optlib.jl")
 
-using Plots
 using JLD
-using ColorSchemes
 using Flux
 using Flux.Tracker
 using ProgressMeter
 using Main.femlib
-
-# Setting plot backends
-plotlyjs()
+using Main.optlib
 
 ## Problem Setup
 
 # Defining Nodes
-xyNodes = param([
-    0. 0.
-    1. 2.
-    2. 0.
-    3. 2.
-    4. 0.
-    5. 2.
-    6. 0.
-    7. 2.
-    8. 0.
-])
-NNodes = size(xyNodes, 1)
-
-Nodes = [Node(x,y,true,true,i*2-1,i*2) for (i,(x,y)) in enumerate(zip(xyNodes[:,1], xyNodes[:,2]))]
-
-iNodeFixed = [1, 9]
-bNodeFree = ones(NNodes,2)
-for i in iNodeFixed
-    Nodes[i].bX = false
-    Nodes[i].bY = false
-    bNodeFree[i,:] *= 0.
-end
-
-iNodeOptimise = 5
-
-# Defining edges
-edges = [
-    1 2
-    1 3
-    2 3
-    2 4
-    3 4
-    3 5
-    4 5
-    4 6
-    5 6
-    5 7
-    6 7
-    6 8
-    7 8
-    7 9
-    8 9
-]
-
-A = 0.02
-E = 30e6
-Edges = map((a,b)->Edge(a,b,A,E,calc_IGlobal(a,b,Nodes[a],Nodes[b])), edges[:,1], edges[:,2])
+xyNodes =   param([
+            0. 0.
+            1. 2.
+            2. 0.
+            3. 2.
+            4. 0.
+            5. 2.
+            6. 0.
+            7. 2.
+            8. 0.
+            ])
 
 # Defining Loads
-loads = zeros(NNodes, 2)
-loads[5, :] = [0. -10.] #TODO: Relate learning rate to force
+Loads   = zeros(size(xyNodes, 1), 2)
+Loads[5, :] = [0. -10.]
 
-function optimiseFEM(Nodes, loads, targets)
+# Defining edges
+edges   =   [
+            1 2
+            1 3
+            2 3
+            2 4
+            3 4
+            3 5
+            4 5
+            4 6
+            5 6
+            5 7
+            6 7
+            6 8
+            7 8
+            7 9
+            8 9
+            ]
 
-    FEdge, xDisplacement = solveFEM(Nodes, Edges, loads)
-    cost = xDisplacement[iNodeOptimise]
+bFixed  = [true, false, false, false, false, false, false, false, true]
+bFree   = map(!, bFixed)
 
-    return cost
+A       = 0.02 # Cross sectional area of beam
+E       = 30e6 # Stiffness coefficient
 
-end
+Nodes   = [Node(x,y,b,b,i*2-1,i*2) for (i,(x,y,b)) in enumerate(zip(xyNodes[:,1], xyNodes[:,2], bFree))]
+Edges   = map((a,b)->Edge(a, b, A, E, calc_IGlobal(a,b,Nodes[a],Nodes[b])), edges[:,1], edges[:,2])
+Truss   = Structure(Nodes, Edges)
+Sim     = LoadSimulation(Truss, Loads)
 
-θ = Params([xyNodes])
-target = 0. # Target displacement
-gradfcn = Tracker.gradient(()->optimiseFEM(Nodes, loads, target), θ)
+# Optimisation
+Targets = 0. # Target displacement
+CostFcn = (F,x) -> x[5] - Targets
+Prob    = Problem(Sim, CostFcn)
 
-NEpochs = Int64(1e5)
+# Selecting parameters for optimiation
+θ       = Params([xyNodes])
 
-storage = Array{Array{Float64,2},1}(undef, NEpochs)
-storage2 = Array{Array{Float64,2},1}(undef, NEpochs)
+# Defining backprop function
+gradfcn = Tracker.gradient(()->optimiseFEM(Prob), θ)
 
-opt = ADAM()
+# Configuring backprop
+opt     = Descent(1) #opt = ADAM()
+NEpochs = Int64(1e4)
+
+# Configuring log pre-allocation
+log_xyNodes = Array{Array{Float64,2},1}(undef, NEpochs)
+log_FEdges  = Array{Array{Float64,2},1}(undef, NEpochs)
+
+# Calculating bNodeFree matrix
+bNodeFree   = vcat(map(x->[x.bX, x.bY], Nodes)'...)
 
 @showprogress for i = 1:NEpochs
 
     # Calculating edge properties
-    FEdge, xDisplacement = solveFEM(Nodes, Edges, loads)
+    FEdge, xDisplacement = solveFEM(Sim)
 
     # Calculating gradients
     grads = gradfcn[xyNodes] .* bNodeFree
 
     # SGD
     Tracker.update!(opt, xyNodes, grads)
-    for (ix, Node) in enumerate(Nodes)
+    for (ix, Node) in enumerate(Sim.Structure.Nodes)
         Node.X = xyNodes[ix,1]
         Node.Y = xyNodes[ix,2]
     end
 
     # Storing data
-    storage[i] = map(x->x.data, xyNodes)
-    storage2[i] = map(x->x.data, FEdge)
+    log_xyNodes[i] = map(x->x.data, xyNodes)
+    log_FEdges[i] = map(x->x.data, FEdge)
 
 end
 
-# Saving cached data
-save("/tmp/myfile.jld", "storage", storage, "storage2", storage2, "edges", edges)
+# Plotting data
+plot_structure(log_xyNodes, log_FEdges, Truss, 100)
 
-# Loading cached data
-cached = load("/tmp/myfile.jld")
-storage = cached["storage"]
-storage2 = cached["storage2"]
-edges = cached["edges"]
-nodes = storage[end]
-
-@gif for i in 1:100:size(storage,1)
-    Fs = storage2[i][1,:]
-    FMax = max(maximum(Fs), -minimum(Fs))
-    plt = scatter(storage[i][:,1], storage[i][:,2], legend=false)
-    for j = 1:size(edges, 1)
-        col = get(ColorSchemes.coolwarm, storage2[i][1,j]/FMax/2+0.5)
-        plot!(plt, storage[i][edges[j,:],1], storage[i][edges[j,:],2], legend=false, linecolor=col)
-    end
-
+# Saving data
+jldopen("/tmp/fem_optimisation.jld", "w") do file
+    #addrequire(file, femlib)
+    write(file, "xyNodes", log_xyNodes)
+    write(file, "FEdges", log_FEdges)
+    #write(file, "Sim", Sim)
 end

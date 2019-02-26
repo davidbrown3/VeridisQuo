@@ -1,4 +1,9 @@
-function solveFEM(Nodes::Array{Node,1}, Edges::Array{Edge,1}, loads)
+function solveFEM(Sim::LoadSimulation)
+
+    # Parsing inputs
+    Nodes = Sim.Structure.Nodes
+    Edges = Sim.Structure.Edges
+    Loads = Sim.Loads
 
     # Parsing Nodes
     iDOFFree, iDOFFixed = Int64[], Int64[]
@@ -12,7 +17,7 @@ function solveFEM(Nodes::Array{Node,1}, Edges::Array{Edge,1}, loads)
     NDOFSystem = max(maximum(iDOFFree), maximum(iDOFFixed))
 
     # Parsing loads
-    loadsDOF = reshape(loads',:,1)[:] # Indexing loads by DOF as opposed to node
+    LoadsDOF = reshape(Loads',:,1)[:] # Indexing loads by DOF as opposed to node
 
     # For compatability with autodiff
     ADType = typeof(xNodes[1])
@@ -51,7 +56,7 @@ function solveFEM(Nodes::Array{Node,1}, Edges::Array{Edge,1}, loads)
     KSystem_FreeFree = KSystem[iDOFFree, iDOFFree]
 
     # Prescribing known forces / displacements
-    FFree = loadsDOF[iDOFFree]
+    FFree = LoadsDOF[iDOFFree]
     xFixed = zeros(size(iDOFFixed))
 
     # Calculating unknown forces / displacements
