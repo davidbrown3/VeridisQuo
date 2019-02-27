@@ -66,13 +66,9 @@ Prob    = Problem(Sim, CostFcn)
 # Selecting parameters for optimiation
 θ       = Params([xyNodes])
 
-# Defining backprop function
-gradfcn = Tracker.gradient(()->-optimiseFEM(Prob)[1], θ)
-
 # Configuring backprop
-#opt     = Descent(1)
-opt     = ADAM(1e-5)
-NEpochs = Int64(5e4)
+opt     = ADAM(1e-3)
+NEpochs = Int64(5e3)
 
 # Configuring log pre-allocation
 log_xyNodes = Array{Array{Float64,2},1}(undef, NEpochs)
@@ -88,6 +84,7 @@ bNodeFree   = vcat(map(x->[x.bX, x.bY], Nodes)'...)
     Cost, FEdge, xDisplacement = optimiseFEM(Prob)
 
     # Calculating gradients
+    gradfcn = Tracker.gradient(()->-optimiseFEM(Prob)[1], θ)
     grads = gradfcn[xyNodes] .* bNodeFree
 
     # SGD
