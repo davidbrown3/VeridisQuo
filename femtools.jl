@@ -40,7 +40,7 @@ plotlyjs()
 
 function plot_structure(xyNodes::Array{Array{Float64,2},1}, FEdges::Array{Array{Float64,2},1}, Structure::Structure, inc::Int64=100)
 
-    @gif for i in 1:100:size(xyNodes, 1)
+    @gif for i in map(x->Int64(floor(x)), range(1.,Float64(size(xyNodes, 1)),length=1000))
         Fs = FEdges[i][1,:]
         FMax = max(maximum(Fs), -minimum(Fs))
         plt = scatter(xyNodes[i][:,1], xyNodes[i][:,2], legend=false)

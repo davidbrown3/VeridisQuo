@@ -3,6 +3,7 @@ include("./optlib.jl")
 
 using JLD
 using Flux
+using Plots
 using Flux.Tracker
 using ProgressMeter
 using Main.femlib
@@ -66,23 +67,25 @@ Prob    = Problem(Sim, CostFcn)
 θ       = Params([xyNodes])
 
 # Defining backprop function
-gradfcn = Tracker.gradient(()->optimiseFEM(Prob), θ)
+gradfcn = Tracker.gradient(()->-optimiseFEM(Prob)[1], θ)
 
 # Configuring backprop
-opt     = Descent(1) #opt = ADAM()
-NEpochs = Int64(1e4)
+#opt     = Descent(1)
+opt     = ADAM(1e-5)
+NEpochs = Int64(5e4)
 
 # Configuring log pre-allocation
 log_xyNodes = Array{Array{Float64,2},1}(undef, NEpochs)
 log_FEdges  = Array{Array{Float64,2},1}(undef, NEpochs)
+log_cost    = Array{Float64,1}(undef, NEpochs)
 
 # Calculating bNodeFree matrix
 bNodeFree   = vcat(map(x->[x.bX, x.bY], Nodes)'...)
 
 @showprogress for i = 1:NEpochs
 
-    # Calculating edge properties
-    FEdge, xDisplacement = solveFEM(Sim)
+    # Calculating forward pass
+    Cost, FEdge, xDisplacement = optimiseFEM(Prob)
 
     # Calculating gradients
     grads = gradfcn[xyNodes] .* bNodeFree
@@ -97,10 +100,22 @@ bNodeFree   = vcat(map(x->[x.bX, x.bY], Nodes)'...)
     # Storing data
     log_xyNodes[i] = map(x->x.data, xyNodes)
     log_FEdges[i] = map(x->x.data, FEdge)
+    log_cost[i] = Cost.data
 
 end
 
-# Plotting data
+# Plotting progress
+plt = plot(log_cost,
+            ylabel = "Center node displacement",
+            xlabel = "# Epoch",
+            legend=false,
+            linewidth=2
+            )
+png(plt, "./TrainingLog")
+
+display(plt)
+
+# Animating data
 plot_structure(log_xyNodes, log_FEdges, Truss, 100)
 
 # Saving data

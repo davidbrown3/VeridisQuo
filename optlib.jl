@@ -20,8 +20,8 @@ function optimiseFEM(Prob::Problem)
 
     FEdge, xDisplacement = solveFEM(Prob.Sim)
     cost = Prob.CostFcn(FEdge, xDisplacement)
-
-    return cost
+    
+    return cost, FEdge, xDisplacement
 
 end
 
